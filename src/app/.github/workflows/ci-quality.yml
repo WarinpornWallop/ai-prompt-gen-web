@@ -1,0 +1,102 @@
+name: Deploy & Quality Gate (Public Reports)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pages: write           # ✅ สำหรับ deploy Pages
+  id-token: write        # ✅ สำหรับ OIDC deploy
+
+jobs:
+  deploy_and_test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # --- (เดิม) Build & Deploy Vercel + สแกนคุณภาพ ---
+      # ... Vercel deploy (ได้ DEPLOY_URL) ...
+      # ... Lighthouse CI → ได้ไฟล์ใน .lighthouseci/ ...
+      # ... Pa11y → pa11y-report.json ...
+      # ... Semgrep → semgrep.sarif ...
+      # ... Bearer → bearer-privacy.json ...
+      # ... PSI (optional) → psi-mobile.json ...
+      # ... ZAP (optional) → zap.html ...
+
+      # --- รวมไฟล์เข้าโครง public-reports ---
+      - name: Assemble public reports
+        id: assemble
+        run: |
+          RUN_ID=${{ github.run_id }}
+          mkdir -p public-reports/latest
+          mkdir -p public-reports/runs/${RUN_ID}
+
+          # คัดลอกรายงานเข้า latest/
+          # Lighthouse: เลือกไฟล์หลัก (กรณีคุณใช้ treosh/lighthouse-ci-action จะมีผลใน .lighthouseci/)
+          # หากคุณมีผล lighthouse เป็นไฟล์เดียวชื่ออื่น ให้ปรับตามจริง
+          if [ -d ".lighthouseci" ]; then
+            # ตัวอย่าง: เก็บไฟล์ LHR ล่าสุดไฟล์เดียว (ปรับตาม output ของคุณ)
+            cp -r .lighthouseci/* public-reports/latest/
+          fi
+
+          # คัดลอกไฟล์อื่น ๆ
+          [ -f pa11y-report.json ] && cp pa11y-report.json public-reports/latest/
+          [ -f semgrep.sarif ] && cp semgrep.sarif public-reports/latest/
+          [ -f bearer-privacy.json ] && cp bearer-privacy.json public-reports/latest/
+          [ -f psi-mobile.json ] && cp psi-mobile.json public-reports/latest/
+          [ -f zap.html ] && cp zap.html public-reports/latest/
+
+          # สร้าง summary index.json (แกะคะแนนแบบง่าย ๆ; ปรับ parsing ตาม output ของคุณ)
+          PERF=$(jq -r '(.lighthouseResult.categories.performance.score // .categories.performance.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
+          A11Y=$(jq -r '(.lighthouseResult.categories.accessibility.score // .categories.accessibility.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
+          SEO=$(jq -r '(.lighthouseResult.categories.seo.score // .categories.seo.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
+          BEST=$(jq -r '(.lighthouseResult.categories["best-practices"].score // .categories["best-practices"].score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
+
+          # นับจำนวน issue จาก Pa11y / Semgrep / Bearer แบบง่าย
+          PERR=$( [ -f public-reports/latest/pa11y-report.json ] && jq '[.[].issues[] | select(.type==\"error\")] | length' public-reports/latest/pa11y-report.json || echo 0 )
+          SWARN=$( [ -f public-reports/latest/semgrep.sarif ] && jq '.runs[0].results | length' public-reports/latest/semgrep.sarif || echo 0 )
+          BFOUND=$( [ -f public-reports/latest/bearer-privacy.json ] && jq '.findings | length // .summary.total_findings // 0' public-reports/latest/bearer-privacy.json || echo 0 )
+
+          cat > public-reports/latest/index.json <<JSON
+          {
+            "meta": {
+              "runId": ${RUN_ID},
+              "updatedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            },
+            "lighthouse": { "performance": ${PERF:-0}, "accessibility": ${A11Y:-0}, "seo": ${SEO:-0}, "best": ${BEST:-0} },
+            "pa11y": { "errors": ${PERR}, "warnings": 0, "notices": 0 },
+            "semgrep": { "findings": ${SWARN} },
+            "bearer": { "findings": ${BFOUND} },
+            "files": {
+              "lighthouse": "lighthouse.json (or .lighthouseci/*)",
+              "pa11y": "pa11y-report.json",
+              "semgrep": "semgrep.sarif",
+              "bearer": "bearer-privacy.json",
+              "psi": "psi-mobile.json",
+              "zap": "zap.html"
+            }
+          }
+          JSON
+
+          # ทำสำเนาไปที่ runs/<runId>/
+          cp -r public-reports/latest/* public-reports/runs/${RUN_ID}/
+
+      # --- Deploy ไป GitHub Pages ---
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public-reports
+
+      - name: Deploy to GitHub Pages
+        id: pages
+        uses: actions/deploy-pages@v4
