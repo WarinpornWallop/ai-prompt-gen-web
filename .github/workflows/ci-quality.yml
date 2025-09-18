@@ -2,15 +2,15 @@ name: Deploy & Quality Gate (Public Reports)
 
 on:
   push:
-    branches: ["main"] # ปรับให้ตรงกับสาขาที่คุณใช้
-  workflow_dispatch: # เผื่อต้องกดรันเองจากแท็บ Actions
+    branches: [ "main" ]          # ปรับให้ตรงสาขาที่คุณใช้
+  workflow_dispatch:
 
 permissions:
   contents: read
   actions: read
-  pages: write # ✅ สำหรับ deploy Pages
-  id-token: write # ✅ สำหรับ OIDC deploy
-  security-events: write # (เผื่อ Semgrep จะอัปโหลด SARIF ไป Code Scanning)
+  pages: write
+  id-token: write
+  security-events: write
 
 concurrency:
   group: "pages"
@@ -20,11 +20,9 @@ jobs:
   deploy_and_test:
     runs-on: ubuntu-latest
     env:
-      # สำหรับ Vercel CLI
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-      # (ออปชัน) ถ้าโปรเจกต์คุณต้องการระบุ ORG/PROJECT ก็เพิ่ม 2 ตัวนี้เป็น Secrets ของรีโป
-      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}        # ถ้าไม่มี ปล่อยว่างได้
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}# ถ้าไม่มี ปล่อยว่างได้
 
     steps:
       - name: Checkout
@@ -38,15 +36,13 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      # ---------- Deploy (Vercel) ให้ได้ URL ไว้ใช้สแกน ----------
+      # ---------- Deploy (Vercel) ----------
       - name: Install Vercel CLI
         run: npm i -g vercel@latest
 
-      # (ออปชัน) ดึงการตั้งค่าโปรเจกต์จาก Vercel ถ้าคุณใช้ ORG/PROJECT ID
-      - name: Link/prepare Vercel project (optional)
+      - name: (optional) Link Vercel project
         if: ${{ env.VERCEL_ORG_ID != '' && env.VERCEL_PROJECT_ID != '' }}
-        run: |
-          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
 
       - name: Deploy to Vercel (prod)
         id: vercel
@@ -55,8 +51,7 @@ jobs:
           echo "DEPLOY_URL=$DEPLOY_URL" >> "$GITHUB_OUTPUT"
           echo "Deployed to: $DEPLOY_URL"
 
-      # ---------- Performance & Quality ----------
-      # Lighthouse (ผ่านแอ็กชันสำเร็จรูป)
+      # ---------- Quality Scans ----------
       - name: Lighthouse CI
         id: lhci
         uses: treosh/lighthouse-ci-action@v12
@@ -66,7 +61,6 @@ jobs:
           uploadArtifacts: true
           temporaryPublicStorage: true
 
-      # Pa11y (A11y)
       - name: Install Pa11y CI
         run: npm i -g pa11y-ci
       - name: Run Pa11y CI
@@ -77,8 +71,7 @@ jobs:
           }' > .pa11yci
           pa11y-ci --json > pa11y-report.json
 
-      # Semgrep (SAST)
-      - name: Semgrep Scan
+      - name: Semgrep Scan (SAST)
         uses: semgrep/semgrep-action@v1
         with:
           config: p/owasp-top-ten
@@ -86,8 +79,7 @@ jobs:
           sarifFile: semgrep.sarif
         continue-on-error: true
 
-      # Bearer (Privacy)
-      - name: Install Bearer CLI
+      - name: Install Bearer CLI (Privacy)
         run: |
           curl -sfL https://raw.githubusercontent.com/Bearer/bearer/main/contrib/install.sh | sh
           echo "$PWD/bin" >> $GITHUB_PATH
@@ -95,17 +87,7 @@ jobs:
         run: |
           bearer scan . --report privacy --format json > bearer-privacy.json || true
 
-      # PSI (CrUX/field data) – ออปชัน
-      - name: PageSpeed Insights (mobile)
-        if: ${{ secrets.PSI_API_KEY != '' }}
-        env:
-          PSI_URL: ${{ steps.vercel.outputs.DEPLOY_URL }}
-          PSI_KEY: ${{ secrets.PSI_API_KEY }}
-        run: |
-          curl -s "https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${PSI_URL}&strategy=mobile&key=${PSI_KEY}" > psi-mobile.json
-
-
-      # ZAP Baseline (DAST) – ออปชัน (ใช้เวลา อนุโลมไม่ให้ล้มงาน)
+      # (ออปชัน) ZAP Baseline – ถ้าอยากตัดทิ้งก็ลบบล็อกนี้ได้
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.14.0
         with:
@@ -114,37 +96,35 @@ jobs:
           cmd_options: '-a'
         continue-on-error: true
 
-      # ---------- รวบรวมเป็น Public Reports ----------
-      - name: Install jq (for JSON parsing)
+      # ---------- Pack Public Reports ----------
+      - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Assemble public reports
-        id: assemble
         run: |
           set -e
           RUN_ID=${{ github.run_id }}
           mkdir -p public-reports/latest
           mkdir -p public-reports/runs/${RUN_ID}
 
-          # Lighthouse: เก็บทุกอย่างจาก .lighthouseci/ (หรือเลือกไฟล์ LHR ของคุณเอง)
+          # Lighthouse artifacts
           if [ -d ".lighthouseci" ]; then
             cp -r .lighthouseci/* public-reports/latest/
           fi
 
-          # ไฟล์รายงานอื่น ๆ (ตามที่สเต็ปก่อนหน้าสร้างไว้)
+          # Other reports
           [ -f pa11y-report.json ] && cp pa11y-report.json public-reports/latest/
           [ -f semgrep.sarif ] && cp semgrep.sarif public-reports/latest/
           [ -f bearer-privacy.json ] && cp bearer-privacy.json public-reports/latest/
-          [ -f psi-mobile.json ] && cp psi-mobile.json public-reports/latest/
           [ -f zap.html ] && cp zap.html public-reports/latest/
 
-          # ดึงคะแนน Lighthouse แบบยืดหยุ่น (ลองหาจากหลายไฟล์)
+          # Parse Lighthouse scores (ยืดหยุ่น เผื่อไฟล์หลายชื่อ)
           PERF=$(jq -r '(.lighthouseResult.categories.performance.score // .categories.performance.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
           A11Y=$(jq -r '(.lighthouseResult.categories.accessibility.score // .categories.accessibility.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
           SEO=$(jq -r '(.lighthouseResult.categories.seo.score // .categories.seo.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
           BEST=$(jq -r '(.lighthouseResult.categories["best-practices"].score // .categories["best-practices"].score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
 
-          # นับ issue จากรายงานอื่น ๆ
+          # Tally others
           PERR=$( [ -f public-reports/latest/pa11y-report.json ] && jq '[.[].issues[] | select(.type==\"error\")] | length' public-reports/latest/pa11y-report.json || echo 0 )
           SWARN=$( [ -f public-reports/latest/semgrep.sarif ] && jq '.runs[0].results | length' public-reports/latest/semgrep.sarif || echo 0 )
           BFOUND=$( [ -f public-reports/latest/bearer-privacy.json ] && jq '.findings | length // .summary.total_findings // 0' public-reports/latest/bearer-privacy.json || echo 0 )
@@ -165,21 +145,18 @@ jobs:
               "pa11y": "pa11y-report.json",
               "semgrep": "semgrep.sarif",
               "bearer": "bearer-privacy.json",
-              "psi": "psi-mobile.json",
               "zap": "zap.html"
             }
           }
           JSON
 
-          # เก็บประวัติ
           cp -r public-reports/latest/* public-reports/runs/${RUN_ID}/
 
-      # ---------- Deploy ไป GitHub Pages ----------
+      # ---------- Publish to GitHub Pages ----------
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: public-reports
 
       - name: Deploy to GitHub Pages
-        id: pages
         uses: actions/deploy-pages@v4
