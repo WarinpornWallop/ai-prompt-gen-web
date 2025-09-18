@@ -1,7 +1,7 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import PromptForm from '@/components/PromptForm';
-import ReportTabs from '@/components/ReportTabs';
+import ReportTabs, { type Report } from '@/components/ReportTabs';
 import { analyzePrompt } from '@/lib/analyze';
 
 export default function HomePage() {
@@ -11,7 +11,7 @@ export default function HomePage() {
   const [images, setImages] = useState<string[]>([]);
   const [genUrl, setGenUrl] = useState<string>('');
   const [loadingLink, setLoadingLink] = useState(false);
-  const [report, setReport] = useState<any>(null);
+  const [report, setReport] = useState<Report | null>(null); // ✅ typed
   const [loadingReport, setLoadingReport] = useState(false);
 
   const lint = useMemo(() => analyzePrompt(prompt), [prompt]);
@@ -24,7 +24,7 @@ export default function HomePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt, imageUrls: images }),
       });
-      const data = await res.json();
+      const data: { url: string } = await res.json();
       setGenUrl(data.url);
       window.open(data.url, '_blank');
     } finally {
@@ -36,7 +36,7 @@ export default function HomePage() {
     setLoadingReport(true);
     try {
       const res = await fetch('/api/reports');
-      const data = await res.json();
+      const data: Report = await res.json();
       setReport(data);
     } finally {
       setLoadingReport(false);

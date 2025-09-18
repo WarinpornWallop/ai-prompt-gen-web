@@ -26,12 +26,15 @@ const PromptForm: FC<Props> = ({ prompt, setPrompt, images, setImages, lint, onG
         <input
           className="w-full rounded-xl border p-2"
           placeholder="https://... , https://..."
-          onChange={e => setImages(
-            e.target.value
-              .split(',')
-              .map(s => s.trim())
-              .filter(Boolean)
-          )}
+          value={images.join(', ')}                 {/* ✅ ใช้ images */}
+          onChange={e =>
+            setImages(
+              e.target.value
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean)
+            )
+          }
         />
 
         <div className="flex items-center gap-3">

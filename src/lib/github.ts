@@ -10,7 +10,7 @@ async function gh(path: string, init: RequestInit = {}) {
     headers: {
       'Authorization': `Bearer ${TOKEN}`,
       'Accept': 'application/vnd.github+json',
-      ...init.headers,
+      ...(init.headers || {}),
     },
     cache: 'no-store'
   });
@@ -18,33 +18,50 @@ async function gh(path: string, init: RequestInit = {}) {
   return res;
 }
 
-export async function getLatestRun(): Promise<any> {
+export async function getLatestRun(): Promise<{ id: number; html_url?: string } | undefined> {
   const res = await gh(`/repos/${OWNER}/${REPO}/actions/runs?per_page=1`);
-  const json = await res.json();
-  return json.workflow_runs?.[0];
+  const json = (await res.json()) as unknown;
+  if (!json || typeof json !== 'object' || !('workflow_runs' in json)) return undefined;
+  const wr = (json as any).workflow_runs; // local-only narrow (eslint: allow one off)
+  return Array.isArray(wr) ? wr[0] : undefined;
 }
 
 export async function getArtifacts(runId: number) {
   const res = await gh(`/repos/${OWNER}/${REPO}/actions/runs/${runId}/artifacts`);
-  const j = await res.json();
-  return j.artifacts as Array<{ id:number; name:string; archive_download_url:string }>;
+  const j = (await res.json()) as unknown;
+  if (!j || typeof j !== 'object' || !('artifacts' in j)) return [];
+  const arts = (j as any).artifacts;
+  return Array.isArray(arts) ? arts as Array<{ id:number; name:string; archive_download_url:string }> : [];
 }
 
 async function downloadArtifactZip(url: string): Promise<Buffer> {
-  const res = await gh(url, { headers: { 'Accept': 'application/octet-stream' }});
+  const res = await gh(url, { headers: { 'Accept': 'application/octet-stream' } });
   const arrayBuffer = await res.arrayBuffer();
   return Buffer.from(arrayBuffer);
 }
 
-export async function parseQualityReports(arts: Array<{ name:string; archive_download_url:string }>) {
-  let lighthouse: any | undefined;
-  let pa11y: any | undefined;
-  let semgrep: any | undefined;
-  let bearer: any | undefined;
-  let psi: any | undefined;
+// helpers to safely read nested scores
+function readScore(obj: unknown, path: string[]): number | undefined {
+  let cur: unknown = obj;
+  for (const p of path) {
+    if (cur && typeof cur === 'object' && p in (cur as Record<string, unknown>)) {
+      cur = (cur as Record<string, unknown>)[p];
+    } else return undefined;
+  }
+  return typeof cur === 'number' ? cur : undefined;
+}
+
+export async function parseQualityReports(
+  arts: Array<{ name:string; archive_download_url:string }>
+) {
+  let lighthouse: { performance?: number; accessibility?: number; seo?: number; best?: number; raw?: unknown } | undefined;
+  let pa11y: { errors: number; warnings: number; notices: number; raw?: unknown } | undefined;
+  let semgrep: { findings: number; raw?: unknown } | undefined;
+  let bearer: { findings: number; categories?: Record<string, number>; raw?: unknown } | undefined;
+  let psi: { performance?: number; raw?: unknown } | undefined;
 
   for (const a of arts) {
-    if (a.name !== 'quality-reports') continue; // from workflow name
+    if (a.name !== 'quality-reports') continue;
     const buf = await downloadArtifactZip(a.archive_download_url);
     const directory = await unzipper.Open.buffer(buf);
 
@@ -52,44 +69,50 @@ export async function parseQualityReports(arts: Array<{ name:string; archive_dow
       if (!entry.path) continue;
       const lower = entry.path.toLowerCase();
       if (!lower.endsWith('.json') && !lower.endsWith('.sarif')) continue;
+
       const content = await entry.buffer();
-      try {
-        const json = JSON.parse(content.toString('utf-8'));
-        if (lower.includes('.lighthouseci') || json.lighthouseResult || json.categories) {
-          const root = json.lighthouseResult ? json.lighthouseResult : json;
-          if (root.categories) {
-            lighthouse = {
-              performance: (root.categories.performance?.score ?? 0) * 100,
-              accessibility: (root.categories.accessibility?.score ?? 0) * 100,
-              seo: (root.categories.seo?.score ?? 0) * 100,
-              best: (root.categories["best-practices"]?.score ?? 0) * 100,
-              raw: root,
-            };
+      let json: unknown;
+      try { json = JSON.parse(content.toString('utf-8')); } catch { continue; }
+
+      if (lower.includes('.lighthouseci') || (json && typeof json === 'object' && ('lighthouseResult' in json || 'categories' in json))) {
+        const root = (json as any).lighthouseResult ?? json;
+        lighthouse = {
+          performance: (readScore(root, ['categories','performance','score']) ?? 0) * 100,
+          accessibility: (readScore(root, ['categories','accessibility','score']) ?? 0) * 100,
+          seo: (readScore(root, ['categories','seo','score']) ?? 0) * 100,
+          best: (readScore(root, ['categories','best-practices','score']) ?? 0) * 100,
+          raw: root,
+        };
+      } else if (lower.includes('pa11y')) {
+        const arr = Array.isArray(json) ? json as unknown[] : [];
+        const tally = (type: string): number =>
+          arr.reduce((acc: number, r) => {
+            if (!r || typeof r !== 'object' || !('issues' in r)) return acc;
+            const issues = (r as any).issues;
+            if (!Array.isArray(issues)) return acc;
+            return acc + issues.filter((i: any) => i && i.type === type).length;
+          }, 0);
+        pa11y = { errors: tally('error'), warnings: tally('warning'), notices: tally('notice'), raw: json };
+      } else if (lower.endsWith('.sarif')) {
+        const runs = (json && typeof json === 'object' && 'runs' in json) ? (json as any).runs : [];
+        const results = Array.isArray(runs) && runs[0]?.results ? runs[0].results : [];
+        semgrep = { findings: Array.isArray(results) ? results.length : 0, raw: json };
+      } else if (lower.includes('bearer')) {
+        const findings = (json && typeof json === 'object' && 'findings' in json && Array.isArray((json as any).findings))
+          ? (json as any).findings.length
+          : ((json as any)?.summary?.total_findings ?? 0);
+        const categories: Record<string, number> = {};
+        if (json && typeof json === 'object' && 'findings' in json && Array.isArray((json as any).findings)) {
+          for (const f of (json as any).findings) {
+            const cat: unknown = f?.rule?.title ?? f?.type ?? 'other';
+            const key = typeof cat === 'string' ? cat : 'other';
+            categories[key] = (categories[key] || 0) + 1;
           }
-        } else if (lower.includes('pa11y')) {
-          const errors = json.reduce((acc: number, r: any)=> acc + r.issues.filter((i:any)=> i.type === 'error').length, 0);
-          const warnings = json.reduce((acc: number, r: any)=> acc + r.issues.filter((i:any)=> i.type === 'warning').length, 0);
-          const notices = json.reduce((acc: number, r: any)=> acc + r.issues.filter((i:any)=> i.type === 'notice').length, 0);
-          pa11y = { errors, warnings, notices, raw: json };
-        } else if (lower.endsWith('.sarif')) {
-          const findings = json.runs?.[0]?.results?.length ?? 0;
-          semgrep = { findings, raw: json };
-        } else if (lower.includes('bearer')) {
-          const findings = json?.findings?.length ?? json?.summary?.total_findings ?? 0;
-          const categories: Record<string, number> = {};
-          if (Array.isArray(json?.findings)) {
-            for (const f of json.findings) {
-              const cat = f?.rule?.title || f?.type || 'other';
-              categories[cat] = (categories[cat] || 0) + 1;
-            }
-          }
-          bearer = { findings, categories, raw: json };
-        } else if (lower.includes('psi')) {
-          const perf = json?.lighthouseResult?.categories?.performance?.score;
-          psi = { performance: perf ? perf * 100 : undefined, raw: json };
         }
-      } catch (e) {
-        // skip invalid json
+        bearer = { findings, categories, raw: json };
+      } else if (lower.includes('psi')) {
+        const s = readScore(json, ['lighthouseResult','categories','performance','score']);
+        psi = { performance: s ? s * 100 : undefined, raw: json };
       }
     }
   }

@@ -1,18 +1,18 @@
 import { FC } from 'react';
 
-type Report = {
-  lighthouse?: { performance?: number; accessibility?: number; seo?: number; best?: number; raw?: any };
-  pa11y?: { errors: number; warnings: number; notices: number; raw?: any };
-  semgrep?: { findings: number; raw?: any };
-  bearer?: { findings: number; categories?: Record<string, number>; raw?: any };
-  psi?: { performance?: number; raw?: any };
+export type Report = {
+  lighthouse?: { performance?: number; accessibility?: number; seo?: number; best?: number; raw?: unknown };
+  pa11y?: { errors: number; warnings: number; notices: number; raw?: unknown };
+  semgrep?: { findings: number; raw?: unknown };
+  bearer?: { findings: number; categories?: Record<string, number>; raw?: unknown };
+  psi?: { performance?: number; raw?: unknown };
   meta?: { runId?: number; url?: string; updatedAt?: string };
 };
 
-const Score: FC<{ label: string; value?: number; suffix?: string }>=({label, value, suffix='%'}) => (
+const Score: FC<{ label: string; value?: number; suffix?: string }> = ({ label, value, suffix='%' }) => (
   <div className="rounded-xl border p-3">
     <div className="text-sm text-gray-500">{label}</div>
-    <div className="text-2xl font-semibold">{value==null? '—' : Math.round(value) + suffix}</div>
+    <div className="text-2xl font-semibold">{value==null ? '—' : Math.round(value) + suffix}</div>
   </div>
 );
 
