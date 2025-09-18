@@ -26,7 +26,7 @@ const PromptForm: FC<Props> = ({ prompt, setPrompt, images, setImages, lint, onG
         <input
           className="w-full rounded-xl border p-2"
           placeholder="https://... , https://..."
-          value={images.join(', ')}                 {/* ✅ ใช้ images */}
+          value={images.join(', ')}      
           onChange={e =>
             setImages(
               e.target.value

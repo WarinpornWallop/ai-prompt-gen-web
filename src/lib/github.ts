@@ -22,15 +22,25 @@ export async function getLatestRun(): Promise<{ id: number; html_url?: string } 
   const res = await gh(`/repos/${OWNER}/${REPO}/actions/runs?per_page=1`);
   const json = (await res.json()) as unknown;
   if (!json || typeof json !== 'object' || !('workflow_runs' in json)) return undefined;
-  const wr = (json as any).workflow_runs; // local-only narrow (eslint: allow one off)
-  return Array.isArray(wr) ? wr[0] : undefined;
+  const wr = (json as { workflow_runs?: unknown[] }).workflow_runs; // local-only narrow
+  if (Array.isArray(wr) && wr.length > 0) {
+    const first = wr[0];
+    if (first && typeof first === 'object' && 'id' in first && typeof (first as { id: unknown }).id === 'number') {
+      // html_url is optional and may be undefined
+      return {
+        id: (first as { id: number }).id,
+        html_url: (first as { html_url?: string }).html_url
+      };
+    }
+  }
+  return undefined;
 }
 
 export async function getArtifacts(runId: number) {
   const res = await gh(`/repos/${OWNER}/${REPO}/actions/runs/${runId}/artifacts`);
   const j = (await res.json()) as unknown;
   if (!j || typeof j !== 'object' || !('artifacts' in j)) return [];
-  const arts = (j as any).artifacts;
+  const arts = (j as { artifacts?: unknown[] }).artifacts;
   return Array.isArray(arts) ? arts as Array<{ id:number; name:string; archive_download_url:string }> : [];
 }
 
@@ -75,7 +85,7 @@ export async function parseQualityReports(
       try { json = JSON.parse(content.toString('utf-8')); } catch { continue; }
 
       if (lower.includes('.lighthouseci') || (json && typeof json === 'object' && ('lighthouseResult' in json || 'categories' in json))) {
-        const root = (json as any).lighthouseResult ?? json;
+  const root = (json as { lighthouseResult?: unknown })?.lighthouseResult ?? json;
         lighthouse = {
           performance: (readScore(root, ['categories','performance','score']) ?? 0) * 100,
           accessibility: (readScore(root, ['categories','accessibility','score']) ?? 0) * 100,
@@ -84,26 +94,26 @@ export async function parseQualityReports(
           raw: root,
         };
       } else if (lower.includes('pa11y')) {
-        const arr = Array.isArray(json) ? json as unknown[] : [];
+        const arr = Array.isArray(json) ? json as Array<{ issues?: Array<{ type?: string }> }> : [];
         const tally = (type: string): number =>
           arr.reduce((acc: number, r) => {
             if (!r || typeof r !== 'object' || !('issues' in r)) return acc;
-            const issues = (r as any).issues;
+            const issues = (r as { issues?: Array<{ type?: string }> }).issues;
             if (!Array.isArray(issues)) return acc;
-            return acc + issues.filter((i: any) => i && i.type === type).length;
+            return acc + issues.filter((i) => i && i.type === type).length;
           }, 0);
         pa11y = { errors: tally('error'), warnings: tally('warning'), notices: tally('notice'), raw: json };
       } else if (lower.endsWith('.sarif')) {
-        const runs = (json && typeof json === 'object' && 'runs' in json) ? (json as any).runs : [];
-        const results = Array.isArray(runs) && runs[0]?.results ? runs[0].results : [];
-        semgrep = { findings: Array.isArray(results) ? results.length : 0, raw: json };
+  const runs = (json && typeof json === 'object' && 'runs' in json) ? (json as { runs?: Array<{ results?: unknown[] }> }).runs : [];
+  const results = Array.isArray(runs) && runs[0] && Array.isArray(runs[0].results) ? runs[0].results : [];
+  semgrep = { findings: Array.isArray(results) ? results.length : 0, raw: json };
       } else if (lower.includes('bearer')) {
-        const findings = (json && typeof json === 'object' && 'findings' in json && Array.isArray((json as any).findings))
-          ? (json as any).findings.length
-          : ((json as any)?.summary?.total_findings ?? 0);
+        const findings = (json && typeof json === 'object' && 'findings' in json && Array.isArray((json as { findings?: unknown[] }).findings))
+          ? (json as { findings: unknown[] }).findings.length
+          : ((json as { summary?: { total_findings?: number } })?.summary?.total_findings ?? 0);
         const categories: Record<string, number> = {};
-        if (json && typeof json === 'object' && 'findings' in json && Array.isArray((json as any).findings)) {
-          for (const f of (json as any).findings) {
+        if (json && typeof json === 'object' && 'findings' in json && Array.isArray((json as { findings?: unknown[] }).findings)) {
+          for (const f of (json as { findings: Array<{ rule?: { title?: string }; type?: string }> }).findings) {
             const cat: unknown = f?.rule?.title ?? f?.type ?? 'other';
             const key = typeof cat === 'string' ? cat : 'other';
             categories[key] = (categories[key] || 0) + 1;
