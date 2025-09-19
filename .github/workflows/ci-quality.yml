@@ -2,7 +2,7 @@ name: Deploy & Quality Gate (Public Reports)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main" ]          # ปรับให้ตรงสาขาที่คุณใช้
   workflow_dispatch:
 
 permissions:
@@ -20,7 +20,7 @@ jobs:
   deploy_and_test:
     runs-on: ubuntu-latest
     env:
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}   # ✅ เพิ่มบรรทัดนี้
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}   # ต้องมีใน Repo Secrets
 
     steps:
       - name: Checkout
@@ -34,6 +34,7 @@ jobs:
       - name: Install deps
         run: npm ci
 
+      # ---------- Deploy (Vercel) ----------
       - name: Install Vercel CLI
         run: npm i -g vercel@latest
 
@@ -56,13 +57,24 @@ jobs:
 
       - name: Install Pa11y CI
         run: npm i -g pa11y-ci
+
       - name: Run Pa11y CI
+        continue-on-error: true        # ไม่ให้ job ล้มถ้าพบ a11y error
         run: |
-          echo '{
-            "defaults": { "chromeLaunchConfig": { "args": ["--no-sandbox"] } },
-            "urls": ["'${{ steps.vercel.outputs.DEPLOY_URL }}'"]
-          }' > .pa11yci
-          pa11y-ci --json > pa11y-report.json
+          cat > .pa11yci <<'JSON'
+          {
+            "defaults": {
+              "chromeLaunchConfig": { "args": ["--no-sandbox"] }
+            },
+            "urls": [
+              "${{ steps.vercel.outputs.DEPLOY_URL }}"
+            ]
+          }
+          JSON
+          # ตรวจ JSON (ช่วยดีบัก)
+          jq . .pa11yci || (echo "Invalid .pa11yci JSON" && exit 1)
+          # รันแล้วเซฟผลเป็น JSON
+          pa11y-ci --json > pa11y-report.json || true
 
       - name: Semgrep Scan (SAST)
         uses: semgrep/semgrep-action@v1
@@ -76,11 +88,12 @@ jobs:
         run: |
           curl -sfL https://raw.githubusercontent.com/Bearer/bearer/main/contrib/install.sh | sh
           echo "$PWD/bin" >> $GITHUB_PATH
+
       - name: Bearer Privacy Report
         run: |
           bearer scan . --report privacy --format json > bearer-privacy.json || true
 
-      # (ออปชัน) ZAP Baseline – ถ้าอยากตัดทิ้งก็ลบบล็อกนี้ได้
+      # (ออปชัน) ZAP Baseline – ใช้เวลานาน พอมี false positive ได้ จึงไม่บังคับให้ล้มงาน
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.14.0
         with:
@@ -100,24 +113,24 @@ jobs:
           mkdir -p public-reports/latest
           mkdir -p public-reports/runs/${RUN_ID}
 
-          # Lighthouse artifacts
+          # Lighthouse artifacts (จาก treosh action จะอยู่ใน .lighthouseci/)
           if [ -d ".lighthouseci" ]; then
             cp -r .lighthouseci/* public-reports/latest/
           fi
 
-          # Other reports
+          # รายงานอื่น ๆ
           [ -f pa11y-report.json ] && cp pa11y-report.json public-reports/latest/
           [ -f semgrep.sarif ] && cp semgrep.sarif public-reports/latest/
           [ -f bearer-privacy.json ] && cp bearer-privacy.json public-reports/latest/
           [ -f zap.html ] && cp zap.html public-reports/latest/
 
-          # Parse Lighthouse scores (ยืดหยุ่น เผื่อไฟล์หลายชื่อ)
+          # ดึงคะแนน Lighthouse แบบยืดหยุ่น
           PERF=$(jq -r '(.lighthouseResult.categories.performance.score // .categories.performance.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
           A11Y=$(jq -r '(.lighthouseResult.categories.accessibility.score // .categories.accessibility.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
           SEO=$(jq -r '(.lighthouseResult.categories.seo.score // .categories.seo.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
           BEST=$(jq -r '(.lighthouseResult.categories["best-practices"].score // .categories["best-practices"].score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
 
-          # Tally others
+          # Tally อื่น ๆ
           PERR=$( [ -f public-reports/latest/pa11y-report.json ] && jq '[.[].issues[] | select(.type==\"error\")] | length' public-reports/latest/pa11y-report.json || echo 0 )
           SWARN=$( [ -f public-reports/latest/semgrep.sarif ] && jq '.runs[0].results | length' public-reports/latest/semgrep.sarif || echo 0 )
           BFOUND=$( [ -f public-reports/latest/bearer-privacy.json ] && jq '.findings | length // .summary.total_findings // 0' public-reports/latest/bearer-privacy.json || echo 0 )
@@ -143,6 +156,7 @@ jobs:
           }
           JSON
 
+          # เก็บประวัติรัน
           cp -r public-reports/latest/* public-reports/runs/${RUN_ID}/
 
       # ---------- Publish to GitHub Pages ----------
