@@ -1,8 +1,8 @@
-name: Deploy & Quality Gate (Public Reports)
+name: Deploy & Quality Gate (Public Reports, ZAP Non-Fatal)
 
 on:
   push:
-    branches: [ "main" ]          # ปรับให้ตรงสาขาที่คุณใช้
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
@@ -11,6 +11,7 @@ permissions:
   pages: write
   id-token: write
   security-events: write
+  # ไม่ให้สร้าง issues โดยไม่ตั้งใจ
 
 concurrency:
   group: "pages"
@@ -20,7 +21,7 @@ jobs:
   deploy_and_test:
     runs-on: ubuntu-latest
     env:
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}   # ต้องมีใน Repo Secrets
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
 
     steps:
       - name: Checkout
@@ -59,7 +60,7 @@ jobs:
         run: npm i -g pa11y-ci
 
       - name: Run Pa11y CI
-        continue-on-error: true        # ไม่ให้ job ล้มถ้าพบ a11y error
+        continue-on-error: true
         run: |
           cat > .pa11yci <<'JSON'
           {
@@ -71,9 +72,7 @@ jobs:
             ]
           }
           JSON
-          # ตรวจ JSON (ช่วยดีบัก)
           jq . .pa11yci || (echo "Invalid .pa11yci JSON" && exit 1)
-          # รันแล้วเซฟผลเป็น JSON
           pa11y-ci --json > pa11y-report.json || true
 
       - name: Semgrep Scan (SAST)
@@ -93,13 +92,14 @@ jobs:
         run: |
           bearer scan . --report privacy --format json > bearer-privacy.json || true
 
-      # (ออปชัน) ZAP Baseline – ใช้เวลานาน พอมี false positive ได้ จึงไม่บังคับให้ล้มงาน
-      - name: ZAP Baseline Scan
+      # ---------- ZAP: ไม่ล้มงาน / ไม่สร้าง Issue ----------
+      - name: ZAP Baseline Scan (non-fatal)
         uses: zaproxy/action-baseline@v0.14.0
         with:
           target: ${{ steps.vercel.outputs.DEPLOY_URL }}
-          fail_action: true
-          cmd_options: '-a'
+          fail_action: false     # ✅ มี alerts ก็ไม่ fail
+          cmd_options: '-a'      # โหมด aggressive; จะเปลี่ยนเป็น '-m 1' เพื่อลด false positive ก็ได้
+          token: ''              # ✅ ไม่ให้พยายามสร้าง GitHub Issue
         continue-on-error: true
 
       # ---------- Pack Public Reports ----------
@@ -113,24 +113,19 @@ jobs:
           mkdir -p public-reports/latest
           mkdir -p public-reports/runs/${RUN_ID}
 
-          # Lighthouse artifacts (จาก treosh action จะอยู่ใน .lighthouseci/)
           if [ -d ".lighthouseci" ]; then
             cp -r .lighthouseci/* public-reports/latest/
           fi
-
-          # รายงานอื่น ๆ
           [ -f pa11y-report.json ] && cp pa11y-report.json public-reports/latest/
           [ -f semgrep.sarif ] && cp semgrep.sarif public-reports/latest/
           [ -f bearer-privacy.json ] && cp bearer-privacy.json public-reports/latest/
           [ -f zap.html ] && cp zap.html public-reports/latest/
 
-          # ดึงคะแนน Lighthouse แบบยืดหยุ่น
           PERF=$(jq -r '(.lighthouseResult.categories.performance.score // .categories.performance.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
           A11Y=$(jq -r '(.lighthouseResult.categories.accessibility.score // .categories.accessibility.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
           SEO=$(jq -r '(.lighthouseResult.categories.seo.score // .categories.seo.score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
           BEST=$(jq -r '(.lighthouseResult.categories["best-practices"].score // .categories["best-practices"].score // 0) * 100' public-reports/latest/* 2>/dev/null | head -n1)
 
-          # Tally อื่น ๆ
           PERR=$( [ -f public-reports/latest/pa11y-report.json ] && jq '[.[].issues[] | select(.type==\"error\")] | length' public-reports/latest/pa11y-report.json || echo 0 )
           SWARN=$( [ -f public-reports/latest/semgrep.sarif ] && jq '.runs[0].results | length' public-reports/latest/semgrep.sarif || echo 0 )
           BFOUND=$( [ -f public-reports/latest/bearer-privacy.json ] && jq '.findings | length // .summary.total_findings // 0' public-reports/latest/bearer-privacy.json || echo 0 )
@@ -156,7 +151,6 @@ jobs:
           }
           JSON
 
-          # เก็บประวัติรัน
           cp -r public-reports/latest/* public-reports/runs/${RUN_ID}/
 
       # ---------- Publish to GitHub Pages ----------
